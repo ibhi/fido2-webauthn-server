@@ -1,27 +1,27 @@
 package com.noobish.webauthn.webauthnserver.core.service
 
-import com.fasterxml.jackson.databind.ObjectMapper
-import com.fasterxml.jackson.module.kotlin.readValue
 import com.google.common.cache.Cache
 import com.google.common.cache.CacheBuilder
-import com.noobish.webauthn.webauthnserver.core.ChallengeImpl
+import com.noobish.webauthn.webauthnserver.core.dao.DefaultUser
+import com.noobish.webauthn.webauthnserver.core.dao.UserRespository
 import com.noobish.webauthn.webauthnserver.core.data.*
-import com.noobish.webauthn.webauthnserver.core.data.ByteArray
 import com.noobish.webauthn.webauthnserver.data.RegistrationRequest
 import com.webauthn4j.authenticator.Authenticator
+import com.webauthn4j.authenticator.AuthenticatorImpl
+import com.webauthn4j.data.WebAuthnRegistrationContext
 import com.webauthn4j.data.client.Origin
+import com.webauthn4j.data.client.challenge.Challenge
+import com.webauthn4j.data.client.challenge.DefaultChallenge
+import com.webauthn4j.server.ServerProperty
+import com.webauthn4j.validator.WebAuthnRegistrationContextValidator
 import mu.KotlinLogging
 import org.springframework.stereotype.Service
 import java.security.SecureRandom
 import java.util.*
 import java.util.concurrent.TimeUnit
-import com.webauthn4j.server.ServerProperty
-import com.webauthn4j.data.client.challenge.Challenge
-import com.webauthn4j.data.WebAuthnRegistrationContext
-import java.lang.RuntimeException
-import com.webauthn4j.authenticator.AuthenticatorImpl
-import com.webauthn4j.validator.WebAuthnRegistrationContextValidationResponse
-import com.webauthn4j.validator.WebAuthnRegistrationContextValidator
+import com.webauthn4j.validator.WebAuthnAuthenticationContextValidationResponse
+import com.webauthn4j.validator.WebAuthnAuthenticationContextValidator
+import com.webauthn4j.data.WebAuthnAuthenticationContext
 
 
 
@@ -29,56 +29,65 @@ import com.webauthn4j.validator.WebAuthnRegistrationContextValidator
 private val logger = KotlinLogging.logger {}
 private val random = SecureRandom()
 
-private val BASE64_URL_ENCODER = Base64.getUrlEncoder()
-private val BASE64_URL_DECODER = Base64.getUrlDecoder()
+private val BASE64_URL_ENCODER = Base64.getUrlEncoder().withoutPadding()
 private const val RP_ID = "localhost"
 private const val ORIGIN_URL = "https://localhost:8080"
 
 @Service
-class WebAuthenticationService(private val objectMapper: ObjectMapper) {
+class WebAuthenticationService(private val userRespository: UserRespository<String, DefaultUser>) {
 
     private val relyingParty: PublicKeyCredentialRpEntity = PublicKeyCredentialRpEntity(id = RP_ID, name = "My WebAuthn demo")
-    private val registerRequestStorage: Cache<String, CredentialCreationOptions> = CacheBuilder.newBuilder()
+    private val registerRequestStorage: Cache<String, PublicKeyCredentialCreationOptions> = CacheBuilder.newBuilder()
+            .maximumSize(100)
+            .expireAfterAccess(10, TimeUnit.MINUTES)
+            .build();
+
+    private val authenticateRequestStorage: Cache<String, PublicKeyCredentialRequestOptions> = CacheBuilder.newBuilder()
             .maximumSize(100)
             .expireAfterAccess(10, TimeUnit.MINUTES)
             .build();
 
     fun startRegistration(registrationRequest: RegistrationRequest): CredentialCreationOptions {
         logger.trace("startRegistration username: {}, credentialNickname: {}", registrationRequest.userName)
-        val requestId: String = createRandomId().base64Url
-        val credentialCreationOptions = CredentialCreationOptions(
+        val requestId: ByteArray = createRandomId()
+        val publicKeyCredentialCreationOptions = buildPublicKeyCredentialCreationOptions(registrationRequest.userName, registrationRequest.displayName)
+
+        registerRequestStorage.put(stringifyRequestId(requestId), publicKeyCredentialCreationOptions)
+        return CredentialCreationOptions(
                 requestId = requestId,
-                publicKey = buildPublicKeyCredentialCreationOptions(registrationRequest.userName, registrationRequest.displayName)
+                publicKey = publicKeyCredentialCreationOptions
         )
-        registerRequestStorage.put(requestId, credentialCreationOptions)
-        return credentialCreationOptions
     }
 
-    fun finishRegistration(publicKeyCredential: PublicKeyCredential, requestId: String): String {
+    fun finishRegistration(publicKeyCredential: PublicKeyCredential<AuthenticatorAttestationResponse>, requestId: ByteArray): String {
 
-        logger.info { "RequestId from client $requestId" }
+        val requestIdString = stringifyRequestId(requestId)
+        logger.info { "RequestId from client $requestIdString" }
 
-        val credentialCreationOptions: CredentialCreationOptions? = registerRequestStorage.getIfPresent(requestId)
-        val originalChallenge: kotlin.ByteArray? = credentialCreationOptions?.publicKey?.challenge?.getBytes()
-        registerRequestStorage.invalidate(requestId)
 
-        if(originalChallenge == null) {
+        val publicKeyCredentialCreationOptions: PublicKeyCredentialCreationOptions =  Optional.ofNullable(registerRequestStorage.getIfPresent(requestIdString))
+                .orElseThrow { RuntimeException("Invalid request Id") }
+
+        val serverChallenge: ByteArray? = publicKeyCredentialCreationOptions.challenge
+        registerRequestStorage.invalidate(requestIdString)
+
+        if(serverChallenge == null) {
             throw RuntimeException("Incorrect requestId and hence challenge isnt available")
         }
 
         // Client properties
-        val clientDataJSON: kotlin.ByteArray = publicKeyCredential.response.clientDataJSON.getBytes()/* set clientDataJSON */
-        val attestationObject: kotlin.ByteArray = publicKeyCredential.response.attestationObject.getBytes()/* set attestationObject */
+        val clientDataJSON: ByteArray = publicKeyCredential.response.clientDataJSON /* set clientDataJSON */
+        val attestationObject: ByteArray = publicKeyCredential.response.attestationObject /* set attestationObject */
 
         // Server properties
         val origin: Origin = Origin(ORIGIN_URL)/* set origin */
         val rpId: String = RP_ID/* set rpId */
-        val challenge: Challenge? = ChallengeImpl(originalChallenge)/* set challenge */
-        val tokenBindingId: kotlin.ByteArray? = null /* set tokenBindingId */
+        val challenge: Challenge = DefaultChallenge(serverChallenge)/* set challenge */
+        val tokenBindingId: ByteArray? = null /* set tokenBindingId */
         val serverProperty = ServerProperty(origin, rpId, challenge, tokenBindingId)
         val userVerificationRequired = false
 
-        val registrationContext = WebAuthnRegistrationContext(clientDataJSON, attestationObject, serverProperty, userVerificationRequired)
+        val registrationContext = WebAuthnRegistrationContext(clientDataJSON, attestationObject, null, serverProperty, userVerificationRequired, true, Collections.emptyList())
 
         // WebAuthnRegistrationContextValidator.createNonStrictRegistrationContextValidator() returns a WebAuthnRegistrationContextValidator instance
         // which doesn't validate an attestation statement. It is recommended configuration for most web application.
@@ -89,41 +98,114 @@ class WebAuthenticationService(private val objectMapper: ObjectMapper) {
 
         val response = webAuthnRegistrationContextValidator.validate(registrationContext)
 
-// please persist Authenticator object, which will be used in the authentication process.
+        // please persist Authenticator object, which will be used in the authentication process.
         val authenticator = AuthenticatorImpl( // You may create your own Authenticator implementation to save friendly authenticator name
                 response.attestationObject.authenticatorData.attestedCredentialData,
                 response.attestationObject.attestationStatement,
                 response.attestationObject.authenticatorData.signCount
         )
 
+        val user = publicKeyCredentialCreationOptions.user
+
+        val (userId: ByteArray, userName: String, displayName: String) = user
+
+        val userDao = DefaultUser(userId = userId, userName = userName, name = displayName, authenticators =  setOf(authenticator))
+
+        userRespository.save(userName, userDao)
+
         logger.info { "Authenticator: $authenticator" }
-//        return authenticator // please persist authenticator in your manner
 
-//        logger.info { "CLient data JSON: ${String(publicKeyCredential.response.clientDataJSON.getBytes())}" }
-//        val clientData = objectMapper.readValue<CollectedClientData>(String(publicKeyCredential.response.clientDataJSON.getBytes()))
-//        logger.info { "CollectedCLientData: $clientData" }
-//
-//        val originalChallenge: ByteArray? = registerRequestStorage.getIfPresent(requestId)?.publicKey?.challenge
-//        registerRequestStorage.invalidate(requestId)
-//
-//        val actualChallenge = clientData.challenge
-//        val actualOrigin = clientData.origin
-//
-//        logger.info { "ClientData: $clientData, actualOrigin: $actualOrigin, originalOrigin: $RP_ID" }
-//
-//        if(originalChallenge != null && (originalChallenge > actualChallenge)) {
-//            throw RuntimeException("Challenge doesn't match")
-//        }
-//
-//        if(actualOrigin != "https://$RP_ID:8080") {
-//            throw RuntimeException("Origin doesn't match")
-//        }
-//
-//        if(clientData.type != CollectedClientDataType.WEBAUTHN_CREATE.toJsonString()) {
-//            throw RuntimeException("Type doesn't match")
-//        }
+        logger.info { "Persisted user data: ${userRespository.find(userName)}" }
 
-        return "{ \"key\": \"Success\" }"
+        return "{ \"status\": \"ok\" }"
+    }
+
+    fun startAuthentication(userName: String): CredentialRequestOptions {
+        val user = userRespository.find(userName) ?: throw RuntimeException("Invalid username")
+
+        val publicKeyCredentialRequestOptions = buildPublicKeyCredentialRequestOptions(userName, user.authenticators.first())
+        val requestId: ByteArray = createRandomId()
+
+        authenticateRequestStorage.put(stringifyRequestId(requestId), publicKeyCredentialRequestOptions)
+        return CredentialRequestOptions(requestId, publicKeyCredentialRequestOptions)
+    }
+
+    fun finishAuthentication(publicKeyCredential: PublicKeyCredential<AuthenticatorAssertionResponse>, requestId: ByteArray, userName: String): String {
+
+        val requestIdString = stringifyRequestId(requestId)
+
+        logger.info { "RequestId from client $requestIdString" }
+
+        val publicKeyCredentialRequestOptions: PublicKeyCredentialRequestOptions =  Optional.ofNullable(authenticateRequestStorage.getIfPresent(requestIdString))
+                .orElseThrow { RuntimeException("Invalid request Id") }
+
+        val serverChallenge: ByteArray? = publicKeyCredentialRequestOptions.challenge
+        registerRequestStorage.invalidate(requestIdString)
+
+        if(serverChallenge == null) {
+            throw RuntimeException("Incorrect requestId and hence challenge isn't available")
+        }
+
+        // Client properties
+        val credentialId: ByteArray = publicKeyCredential.id/* set credentialId */
+        val clientDataJSON: ByteArray = publicKeyCredential.response.clientDataJSON/* set clientDataJSON */
+        val authenticatorData: ByteArray = publicKeyCredential.response.authenticatorData/* set authenticatorData */
+        val signature: ByteArray = publicKeyCredential.response.signature/* set signature */
+
+// Server properties
+        val origin: Origin = Origin(ORIGIN_URL) /* set origin */
+        val rpId: String = RP_ID /* set rpId */
+        val challenge: Challenge? = DefaultChallenge(serverChallenge) /* set challenge */
+        val tokenBindingId: ByteArray? = null /* set tokenBindingId */
+        val serverProperty = ServerProperty(origin, rpId, challenge, tokenBindingId)
+        val userVerificationRequired = false
+
+        val authenticationContext = WebAuthnAuthenticationContext(
+                credentialId,
+                clientDataJSON,
+                authenticatorData,
+                signature,
+                serverProperty,
+                userVerificationRequired
+        )
+        val authenticator: Authenticator = findAuthenticator(credentialId, userName) // please load authenticator object persisted in the registration process in your manner
+
+        val webAuthnAuthenticationContextValidator = WebAuthnAuthenticationContextValidator()
+
+        val response = webAuthnAuthenticationContextValidator.validate(authenticationContext, authenticator)
+
+        // please update the counter of the authenticator record
+//        updateCounter(
+//                response.authenticatorData.attestedCredentialData.credentialId,
+//                response.authenticatorData.signCount
+//        )
+
+        logger.info { "Response from finish authentication $response" }
+
+        return "{ \"status\": \"ok\" }"
+
+    }
+
+    private fun findAuthenticator(credentialId: ByteArray, userName: String): Authenticator {
+        val user: DefaultUser =  Optional.ofNullable(userRespository.find(userName))
+                .orElseThrow { RuntimeException("User not found") }
+        return user.authenticators
+                .first { authenticator -> authenticator.attestedCredentialData.credentialId!!.contentEquals(credentialId) }
+
+    }
+
+    private fun buildPublicKeyCredentialRequestOptions(userName: String, authenticator: Authenticator): PublicKeyCredentialRequestOptions  {
+        return PublicKeyCredentialRequestOptions(
+                challenge = createChallenge(),
+                rpId = RP_ID,
+                allowCredentials = listOf(
+                        PublicKeyCredentialDescriptor(
+                                type = PublicKeyCredentialType.PUBLIC_KEY,
+                                id = authenticator.attestedCredentialData.credentialId,
+                                transports = setOf(AuthenticatorTransport.USB, AuthenticatorTransport.INTERNAL, AuthenticatorTransport.LIGHTNING , AuthenticatorTransport.NFC, AuthenticatorTransport.BLE)
+                        )
+                )
+        )
     }
 
     private fun buildPublicKeyCredentialCreationOptions(userName: String, displayName: String): PublicKeyCredentialCreationOptions {
@@ -144,12 +226,14 @@ class WebAuthenticationService(private val objectMapper: ObjectMapper) {
     private fun createChallenge(): ByteArray {
         val byteArray = ByteArray(32)
         random.nextBytes(byteArray)
-        return ByteArray(byteArray)
+        return byteArray
     }
 
     private fun createRandomId(): ByteArray {
         return createChallenge()
     }
+
+    private fun stringifyRequestId(requestId: ByteArray) = BASE64_URL_ENCODER.encodeToString(requestId)
 
 
 }

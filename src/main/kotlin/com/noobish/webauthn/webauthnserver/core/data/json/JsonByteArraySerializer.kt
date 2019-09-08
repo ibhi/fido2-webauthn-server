@@ -6,7 +6,7 @@ import com.fasterxml.jackson.databind.SerializerProvider
 import java.util.*
 
 
-private val BASE64_URL_ENCODER = Base64.getUrlEncoder()
+private val BASE64_URL_ENCODER = Base64.getUrlEncoder().withoutPadding()
 
 class JsonByteArraySerializer: JsonSerializer<ByteArray>() {
     override fun serialize(data: ByteArray, jsonGenerator: JsonGenerator, provider: SerializerProvider) {

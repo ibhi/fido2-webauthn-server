@@ -11,7 +11,7 @@ private val BASE64_URL_DECODER = Base64.getUrlDecoder()
 class JsonByteArrayDeserializer: JsonDeserializer<ByteArray>() {
 
     override fun deserialize(jsonParser: JsonParser, context: DeserializationContext?): ByteArray {
-        val data: String = jsonParser.text
+        val data: String = jsonParser.valueAsString
         return BASE64_URL_DECODER.decode(data)
     }
 

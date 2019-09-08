@@ -202,7 +202,7 @@ class WebAuthenticationService(private val userRespository: UserRespository<Stri
                         PublicKeyCredentialDescriptor(
                                 type = PublicKeyCredentialType.PUBLIC_KEY,
                                 id = authenticator.attestedCredentialData.credentialId,
-                                transports = setOf(AuthenticatorTransport.USB, AuthenticatorTransport.INTERNAL, AuthenticatorTransport.LIGHTNING , AuthenticatorTransport.NFC, AuthenticatorTransport.BLE)
+                                transports = setOf(AuthenticatorTransport.USB, AuthenticatorTransport.INTERNAL, AuthenticatorTransport.NFC, AuthenticatorTransport.BLE)
                         )
                 )
         )

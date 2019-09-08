@@ -2,9 +2,9 @@ package com.noobish.webauthn.webauthnserver.core.data
 
 import kotlin.ByteArray
 
-data class PublicKeyCredential<A: AuthenticatorResponse>(
+data class PublicKeyCredential<R: AuthenticatorResponse>(
         val rawId: ByteArray,
         val id: ByteArray,
-        val response: A,
+        val response: R,
         val type: String
 )

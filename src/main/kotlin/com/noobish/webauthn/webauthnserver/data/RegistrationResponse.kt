@@ -1,7 +1,6 @@
 package com.noobish.webauthn.webauthnserver.data
 
-import com.noobish.webauthn.webauthnserver.core.data.PublicKeyCredentialCreationOptions
-
+import com.webauthn4j.data.PublicKeyCredentialCreationOptions
 
 data class RegistrationResponse(
         val userName: String,
